@@ -247,7 +247,6 @@ export default function App() {
     setIsExtracting(true);
     
     try {
-      // ZERO-TRUST extraction: happens entirely in the browser memory
       const extractedData = await extractVitalsFromPDF(uploadedFile, activeDiseaseTab);
       setVitals(extractedData);
     } catch (error) {
@@ -310,7 +309,6 @@ export default function App() {
       if (data.status === "error") throw new Error(`Python Logic Error: ${data.message}`);
 
       if (data.status === "success") {
-        
         let finalFilePath = null;
         if (file) {
           const fileExt = file.name.split('.').pop();
@@ -363,6 +361,38 @@ export default function App() {
 
   const handleDiseaseTabSwitch = (tabName) => {
     if (activeDiseaseTab !== tabName) { setActiveDiseaseTab(tabName); resetWorkflow(); }
+  };
+
+  // Helper function to dynamically generate patient recommendations
+  const getPatientRecommendation = (diseaseType, riskLevel) => {
+    if (riskLevel === 'Low Risk') {
+      return [
+        "Maintain your current healthy diet and exercise routine.",
+        "Continue attending your standard annual physical checkups.",
+        "Keep a personal log of your vitals to track any future changes."
+      ];
+    }
+
+    if (riskLevel === 'High Risk') {
+      if (diseaseType === 'diabetes') {
+        return [
+          "Schedule a fasting blood glucose test with your primary care physician.",
+          "Review your current diet, specifically looking to reduce processed sugars.",
+          "Monitor your blood pressure and BMI trends closely over the next two weeks.",
+          "Share this secure report with your doctor during your next visit."
+        ];
+      }
+      if (diseaseType === 'heart') {
+        return [
+          "Consult a cardiologist to review these specific cardiac metrics.",
+          "Consider discussing an ECG or a standard stress test with your doctor.",
+          "Avoid suddenly starting highly strenuous activities without medical clearance.",
+          "Share this secure report with your doctor during your next visit."
+        ];
+      }
+    }
+    
+    return [];
   };
 
   function MetricCard({ label, value, unit }) {
@@ -484,20 +514,30 @@ export default function App() {
             {result && result.status === 'success' && (
               <div className="mt-8 bg-green-50/80 border border-green-200 p-6 rounded-3xl animate-in fade-in slide-in-from-bottom-4">
                 <div className="flex items-center gap-3 mb-6 pb-4 border-b border-green-200"><CheckCircle2 className="text-green-600 w-8 h-8" /><div><p className="font-bold text-green-900 text-lg">Cloud Analysis Complete</p><p className="text-sm text-green-700">Encrypted data secured in your personal vault.</p></div></div>
-                <div className="flex flex-col md:flex-row items-center justify-between gap-6">
+                <div className="flex flex-col md:flex-row items-start justify-between gap-6">
                   <div className="flex-1 w-full min-w-0">
                     <p className="text-xs font-bold text-green-800 uppercase tracking-wider mb-2 flex items-center gap-1"><Database className="w-3 h-3"/> Encrypted Payload</p>
                     <p className="font-mono text-xs bg-gray-900 text-green-400 p-4 rounded-2xl break-all line-clamp-3 shadow-inner">{result.raw?.encrypted_result?.[0] || result.raw?.encrypted_result}</p>
                   </div>
-                  <div className="w-full md:w-auto flex flex-col items-center justify-center min-w-[200px]">
+                  <div className="w-full md:w-auto flex flex-col items-center justify-center min-w-[300px]">
                     {!patientDecrypted ? (
-                      <button onClick={handlePatientDecrypt} disabled={isPatientDecrypting} className="w-full bg-white hover:bg-gray-50 text-green-800 border border-green-300 px-6 py-4 rounded-2xl font-black transition-all shadow-md disabled:opacity-70 flex items-center justify-center gap-2">
+                      <button onClick={handlePatientDecrypt} disabled={isPatientDecrypting} className="w-full h-full bg-white hover:bg-gray-50 text-green-800 border border-green-300 px-6 py-4 rounded-2xl font-black transition-all shadow-md disabled:opacity-70 flex items-center justify-center gap-2">
                         {isPatientDecrypting ? 'Applying Key...' : <><Key className="w-5 h-5"/> Apply My Private Key</>}
                       </button>
                     ) : (
-                      <div className={`w-full text-center px-8 py-4 rounded-2xl border-2 shadow-sm ${patientDecrypted === 'High Risk' ? 'bg-red-50 border-red-200' : 'bg-green-100 border-green-400'}`}>
-                        <span className="text-xs font-bold uppercase block mb-1 text-gray-500">Local Decryption</span>
-                        <span className={`text-2xl font-black ${patientDecrypted === 'High Risk' ? 'text-red-600' : 'text-green-700'}`}>{patientDecrypted}</span>
+                      <div className="w-full flex flex-col gap-3">
+                        <div className={`w-full text-center px-8 py-4 rounded-2xl border-2 shadow-sm ${patientDecrypted === 'High Risk' ? 'bg-red-50 border-red-200' : 'bg-green-100 border-green-400'}`}>
+                          <span className="text-xs font-bold uppercase block mb-1 text-gray-500">Local Decryption</span>
+                          <span className={`text-2xl font-black ${patientDecrypted === 'High Risk' ? 'text-red-600' : 'text-green-700'}`}>{patientDecrypted}</span>
+                        </div>
+                        <div className="w-full text-sm text-gray-700 text-left border border-gray-200 bg-white/50 p-4 rounded-2xl shadow-sm">
+                          <span className="font-semibold text-gray-900 mb-2 block">Recommended Next Steps:</span>
+                          <ul className="list-disc pl-5 space-y-1">
+                              {getPatientRecommendation(activeDiseaseTab, patientDecrypted).map((step, index) => (
+                                  <li key={index}>{step}</li>
+                              ))}
+                          </ul>
+                        </div>
                       </div>
                     )}
                   </div>
