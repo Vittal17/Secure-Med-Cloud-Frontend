@@ -47,14 +47,28 @@ export default function App() {
   };
 
   useEffect(() => {
+    // 1. Initialize Auth and Cryptography
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session); setLoadingSession(false);
       if (session) initializeCryptography(session.user.id);
     });
+
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
       if (session) initializeCryptography(session.user.id);
     });
+
+    // 2. THE NEW PING: Wake up the Render server in the background
+    const wakeUpCloudServer = async () => {
+      try {
+        await fetch('https://secure-med-cloud.onrender.com/', { mode: 'no-cors' });
+        console.log("Cloud server pre-warmed.");
+      } catch (e) {
+        console.log("Pre-warm ping ignored.");
+      }
+    };
+    wakeUpCloudServer();
+
     return () => subscription.unsubscribe();
   }, []);
 
@@ -292,7 +306,8 @@ export default function App() {
     );
   }
 
-  if (loadingSession) return (<div className="min-h-screen bg-gradient-to-tr from-rose-100 via-orange-100 to-cyan-300 flex items-center justify-center font-sans"><p className="text-gray-600 font-semibold animate-pulse">Securing Connection...</p></div>);
+  // Clinical Minimalist Loader
+  if (loadingSession) return (<div className="min-h-screen bg-slate-50 flex items-center justify-center font-sans"><p className="text-slate-500 font-bold animate-pulse">Securing Connection...</p></div>);
   if (!session) return <Auth />;
 
   const activeHistoryRecords = vaultFilter === 'all' 
@@ -300,10 +315,11 @@ export default function App() {
     : historyRecords.filter(record => record.disease_type === vaultFilter);
 
   return (
-    <div className="min-h-screen bg-gradient-to-tr from-rose-100 via-orange-100 to-cyan-300 p-4 md:p-8 font-sans">
+    // MAIN BACKGROUND: Clinical Minimalist Slate
+    <div className="min-h-screen bg-slate-50 p-4 md:p-8 font-sans">
       <div className="max-w-4xl mx-auto">
         
-        {/* HEADER - Solid Crisp White */}
+        {/* HEADER */}
         <div className="bg-white border border-slate-200 shadow-sm rounded-3xl p-6 mb-8 flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-4">
             <div className="bg-blue-600 p-3 rounded-2xl shadow-inner"><ShieldAlert className="w-8 h-8 text-white" /></div>
@@ -480,7 +496,7 @@ export default function App() {
             {isFetchingHistory ? (
               <div className="text-center py-12 text-slate-500 font-bold animate-pulse">Accessing Vault...</div>
             ) : activeHistoryRecords.length === 0 ? (
-              <div className="text-center py-16 bg-slate-50 border border-slate-200 rounded-3xl"><Database className="w-12 h-12 text-slate-300 mx-auto mb-3" /><p className="font-bold text-slate-500">You have no {vaultFilter !== 'all' ? (vaultFilter === 'diabetes' ? 'Diabetes' : 'Cardiac') : ''} records in your vault.</p></div>
+              <div className="text-center py-16 bg-white border border-slate-200 rounded-3xl shadow-sm"><Database className="w-12 h-12 text-slate-300 mx-auto mb-3" /><p className="font-bold text-slate-500">You have no {vaultFilter !== 'all' ? (vaultFilter === 'diabetes' ? 'Diabetes' : 'Cardiac') : ''} records in your vault.</p></div>
             ) : (
               activeHistoryRecords.map((record) => (
                 <div key={record.id} className="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm hover:shadow-md transition-all flex flex-col md:flex-row gap-6 relative group">
