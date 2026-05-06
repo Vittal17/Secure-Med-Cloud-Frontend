@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { UploadCloud, Activity, Heart, CheckCircle2, AlertCircle, FileText, LogOut, ShieldAlert, Key, Clock, Database, XCircle, Wallet, Copy, X, Download, ExternalLink } from 'lucide-react';
+import { UploadCloud, Activity, Heart, CheckCircle2, AlertCircle, FileText, LogOut, ShieldAlert, Key, Clock, Database, XCircle, Wallet, Copy, X, Download, ExternalLink, LineChart, TrendingDown, TrendingUp } from 'lucide-react';
 import { supabase } from './supabaseClient';
 import Auth from './Auth';
 import * as paillierBigint from 'paillier-bigint';
@@ -16,6 +16,11 @@ export default function App() {
   
   const [importKeyString, setImportKeyString] = useState('');
   const [walletMessage, setWalletMessage] = useState(null);
+
+  // --- NEW STATE FOR TREND ANALYTICS ---
+  const [trendData, setTrendData] = useState(null);
+  const [isGeneratingTrend, setIsGeneratingTrend] = useState(false);
+  const [trendDiseaseFilter, setTrendDiseaseFilter] = useState('diabetes');
 
   const saveKeysLocally = (keys, userId) => {
     const keyData = {
@@ -93,7 +98,6 @@ export default function App() {
 
   const downloadBackupFile = () => {
     if (!keyPair) return;
-    
     const keyData = {
       n: keyPair.publicKey.n.toString(),
       g: keyPair.publicKey.g.toString(),
@@ -102,9 +106,7 @@ export default function App() {
       p: keyPair.privateKey.p ? keyPair.privateKey.p.toString() : null,
       q: keyPair.privateKey.q ? keyPair.privateKey.q.toString() : null
     };
-    
     const backupString = btoa(JSON.stringify(keyData));
-    
     const blob = new Blob([backupString], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -120,22 +122,15 @@ export default function App() {
     try {
       const decoded = atob(importKeyString);
       const parsed = JSON.parse(decoded);
-      
       if (!parsed.n || !parsed.lambda) throw new Error("Invalid format");
-
       const pubKey = new paillierBigint.PublicKey(BigInt(parsed.n), BigInt(parsed.g));
       const privKey = new paillierBigint.PrivateKey(
-        BigInt(parsed.lambda), 
-        BigInt(parsed.mu), 
-        pubKey, 
-        parsed.p ? BigInt(parsed.p) : undefined, 
-        parsed.q ? BigInt(parsed.q) : undefined
+        BigInt(parsed.lambda), BigInt(parsed.mu), pubKey, 
+        parsed.p ? BigInt(parsed.p) : undefined, parsed.q ? BigInt(parsed.q) : undefined
       );
-
       const restoredKeys = { publicKey: pubKey, privateKey: privKey };
       setKeyPair(restoredKeys);
       saveKeysLocally(restoredKeys, session.user.id);
-      
       setWalletMessage({ type: 'success', text: 'Vault restored securely!' });
       setImportKeyString('');
       setTimeout(() => setWalletMessage(null), 3000);
@@ -169,11 +164,8 @@ export default function App() {
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
-    setKeyPair(null);           
-    setHistoryRecords([]);      
-    setResult(null);            
-    setPatientDecrypted(null);  
-    setFile(null);              
+    setKeyPair(null); setHistoryRecords([]); setResult(null); 
+    setPatientDecrypted(null); setFile(null); setTrendData(null);
   };
 
   useEffect(() => {
@@ -198,12 +190,8 @@ export default function App() {
     setOpeningFileId(id);
     const { data, error } = await supabase.storage.from('medical_reports').createSignedUrl(path, 60);
     setOpeningFileId(null);
-
-    if (error) {
-      alert("Could not access file: " + error.message);
-    } else {
-      window.open(data.signedUrl, '_blank'); 
-    }
+    if (error) alert("Could not access file: " + error.message);
+    else window.open(data.signedUrl, '_blank'); 
   };
 
   const handleHistoryDecrypt = (id) => {
@@ -221,6 +209,48 @@ export default function App() {
         setDecryptedHistoryResults(prev => ({ ...prev, [id]: 'Key Mismatch (Data encrypted with an older/different key)' }));
       }
       setDecryptingHistoryId(null);
+    }, 1000);
+  };
+
+  // --- NEW: ZERO-TRUST TREND GENERATOR ---
+  const generateTrendAnalysis = () => {
+    setIsGeneratingTrend(true);
+    setTimeout(() => {
+      try {
+        // 1. Filter and Sort (Oldest to Newest)
+        const targetRecords = historyRecords.filter(r => r.disease_type === trendDiseaseFilter);
+        const sortedRecords = [...targetRecords].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
+        if (sortedRecords.length < 2) {
+          setTrendData({ error: 'Not enough data. Please complete at least 2 analyses to generate a trend.' });
+          setIsGeneratingTrend(false);
+          return;
+        }
+
+        // 2. Decrypt locally to build the trend array
+        const timeline = sortedRecords.map(record => {
+          const ciphertext = BigInt(record.encrypted_result);
+          const decryptedBigInt = keyPair.privateKey.decrypt(ciphertext);
+          const isNegative = decryptedBigInt > (keyPair.publicKey.n / 2n);
+          
+          // Calculate a rough relative score for plotting
+          const rawScore = isNegative 
+            ? Number(decryptedBigInt - keyPair.publicKey.n) 
+            : Number(decryptedBigInt);
+
+          return {
+            id: record.id,
+            date: new Date(record.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }),
+            riskLevel: isNegative ? 'Low Risk' : 'High Risk',
+            scoreMagnitude: rawScore
+          };
+        });
+
+        setTrendData({ error: null, timeline: timeline });
+      } catch (e) {
+        setTrendData({ error: 'Decryption failed. Records may be locked with an older cryptographic key.' });
+      }
+      setIsGeneratingTrend(false);
     }, 1500);
   };
 
@@ -234,54 +264,37 @@ export default function App() {
     const isDiabetesFile = fileName.includes('diabet') || fileName.includes('sugar') || fileName.includes('glucose') || fileName.includes('a1c');
 
     if (activeDiseaseTab === 'diabetes' && isHeartFile) {
-      setResult({ status: 'error', message: 'Report Mismatch: You selected the Diabetes Screen, but uploaded a Cardiac report. Please upload a diabetes-related report or switch tabs.' });
+      setResult({ status: 'error', message: 'Report Mismatch: You selected the Diabetes Screen, but uploaded a Cardiac report.' });
       return;
     }
     if (activeDiseaseTab === 'heart' && isDiabetesFile) {
-      setResult({ status: 'error', message: 'Report Mismatch: You selected the Cardiac Screen, but uploaded a Diabetes report. Please upload a cardiac-related report or switch tabs.' });
+      setResult({ status: 'error', message: 'Report Mismatch: You selected the Cardiac Screen, but uploaded a Diabetes report.' });
       return;
     }
 
-    setResult(null); 
-    setFile(uploadedFile);
-    setIsExtracting(true);
-    
+    setResult(null); setFile(uploadedFile); setIsExtracting(true);
     try {
       const extractedData = await extractVitalsFromPDF(uploadedFile, activeDiseaseTab);
       setVitals(extractedData);
     } catch (error) {
-      setResult({ status: 'error', message: error.message });
-      setFile(null);
-    } finally {
-      setIsExtracting(false);
-    }
+      setResult({ status: 'error', message: error.message }); setFile(null);
+    } finally { setIsExtracting(false); }
   };
 
   const handleAnalysis = async () => {
-    setIsAnalyzing(true);
-    setResult(null);
-    setPatientDecrypted(null); 
-    
+    setIsAnalyzing(true); setResult(null); setPatientDecrypted(null); 
     if (!keyPair) {
-      setResult({ status: 'error', message: 'Cryptographic keys are still generating. Please wait a moment.' });
-      setIsAnalyzing(false);
-      return;
+      setResult({ status: 'error', message: 'Cryptographic keys are still generating.' }); setIsAnalyzing(false); return;
     }
-
     if (activeDiseaseTab === 'diabetes' && !vitals.glucose) {
-      setResult({ status: 'error', message: 'Missing Data: We could not find required Diabetes metrics (like Glucose or Insulin) in this document. Did you upload the wrong report?' });
-      setIsAnalyzing(false);
-      return;
+      setResult({ status: 'error', message: 'Missing Data: We could not find required Diabetes metrics.' }); setIsAnalyzing(false); return;
     }
     if (activeDiseaseTab === 'heart' && !vitals.h_chol) {
-      setResult({ status: 'error', message: 'Missing Data: We could not find required Cardiac metrics (like Cholesterol or Max HR) in this document. Did you upload the wrong report?' });
-      setIsAnalyzing(false);
-      return;
+      setResult({ status: 'error', message: 'Missing Data: We could not find required Cardiac metrics.' }); setIsAnalyzing(false); return;
     }
 
     try {
       const endpoint = `https://secure-med-cloud.onrender.com/api/predict/${activeDiseaseTab}`;
-      
       const rawFeatures = activeDiseaseTab === 'diabetes' 
         ? [vitals.preg, vitals.glucose, vitals.bp, vitals.skin, vitals.insulin, vitals.bmi, vitals.dpf, vitals.age]
         : [vitals.h_age, vitals.h_sex, vitals.h_cp, vitals.h_trestbps, vitals.h_chol, vitals.h_fbs, vitals.h_thalach, vitals.h_exang];
@@ -291,21 +304,14 @@ export default function App() {
         return [keyPair.publicKey.encrypt(BigInt(safeInt)).toString(), 0]; 
       });
       
-      const payload = { 
-        public_key_n: keyPair.publicKey.n.toString(), 
-        encrypted_features: encryptedFeatures 
-      };
+      const payload = { public_key_n: keyPair.publicKey.n.toString(), encrypted_features: encryptedFeatures };
 
       const response = await fetch(endpoint, { 
-        method: 'POST', 
-        headers: { 'Content-Type': 'application/json' }, 
-        body: JSON.stringify(payload) 
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) 
       });
       
       if (!response.ok) throw new Error(`Network Error (${response.status}). Is the Python backend running?`);
-      
       const data = await response.json();
-      
       if (data.status === "error") throw new Error(`Python Logic Error: ${data.message}`);
 
       if (data.status === "success") {
@@ -313,23 +319,16 @@ export default function App() {
         if (file) {
           const fileExt = file.name.split('.').pop();
           const uniqueFileName = `${session.user.id}/${Math.random().toString(36).substring(2)}-${Date.now()}.${fileExt}`;
-          
-          const { error: uploadError } = await supabase.storage
-            .from('medical_reports')
-            .upload(uniqueFileName, file);
-
+          const { error: uploadError } = await supabase.storage.from('medical_reports').upload(uniqueFileName, file);
           if (uploadError) throw new Error("Secure File Upload Failed: " + uploadError.message);
           finalFilePath = uniqueFileName;
         }
 
         const { error: dbError } = await supabase.from('patient_history').insert([{
-            patient_id: session.user.id, 
-            disease_type: activeDiseaseTab,
+            patient_id: session.user.id, disease_type: activeDiseaseTab,
             encrypted_result: String(data.encrypted_result?.[0] || data.encrypted_result), 
-            exponent: data.encrypted_result?.[1] || 0,
-            report_file_path: finalFilePath 
+            exponent: data.encrypted_result?.[1] || 0, report_file_path: finalFilePath 
         }]);
-        
         if (dbError) throw new Error("Supabase Save Failed: " + dbError.message);
         
         setResult({ status: 'success', message: 'Analysis complete.', raw: data });
@@ -337,11 +336,8 @@ export default function App() {
         throw new Error(data.message || "Unknown backend error");
       }
     } catch (error) {
-      console.error(error); 
-      setResult({ status: 'error', message: error.message });
-    } finally { 
-      setIsAnalyzing(false); 
-    }
+      console.error(error); setResult({ status: 'error', message: error.message });
+    } finally { setIsAnalyzing(false); }
   };
 
   const handlePatientDecrypt = () => {
@@ -358,40 +354,16 @@ export default function App() {
   };
 
   const resetWorkflow = () => { setFile(null); setResult(null); setPatientDecrypted(null); };
+  const handleDiseaseTabSwitch = (tabName) => { if (activeDiseaseTab !== tabName) { setActiveDiseaseTab(tabName); resetWorkflow(); }};
 
-  const handleDiseaseTabSwitch = (tabName) => {
-    if (activeDiseaseTab !== tabName) { setActiveDiseaseTab(tabName); resetWorkflow(); }
-  };
-
-  // Helper function to dynamically generate patient recommendations
   const getPatientRecommendation = (diseaseType, riskLevel) => {
     if (riskLevel === 'Low Risk') {
-      return [
-        "Maintain your current healthy diet and exercise routine.",
-        "Continue attending your standard annual physical checkups.",
-        "Keep a personal log of your vitals to track any future changes."
-      ];
+      return ["Maintain your current healthy diet and exercise routine.", "Continue attending your standard annual physical checkups.", "Keep a personal log of your vitals to track any future changes."];
     }
-
     if (riskLevel === 'High Risk') {
-      if (diseaseType === 'diabetes') {
-        return [
-          "Schedule a fasting blood glucose test with your primary care physician.",
-          "Review your current diet, specifically looking to reduce processed sugars.",
-          "Monitor your blood pressure and BMI trends closely over the next two weeks.",
-          "Share this secure report with your doctor during your next visit."
-        ];
-      }
-      if (diseaseType === 'heart') {
-        return [
-          "Consult a cardiologist to review these specific cardiac metrics.",
-          "Consider discussing an ECG or a standard stress test with your doctor.",
-          "Avoid suddenly starting highly strenuous activities without medical clearance.",
-          "Share this secure report with your doctor during your next visit."
-        ];
-      }
+      if (diseaseType === 'diabetes') return ["Schedule a fasting blood glucose test with your primary care physician.", "Review your current diet, specifically looking to reduce processed sugars.", "Monitor your blood pressure and BMI trends closely over the next two weeks.", "Share this secure report with your doctor during your next visit."];
+      if (diseaseType === 'heart') return ["Consult a cardiologist to review these specific cardiac metrics.", "Consider discussing an ECG or a standard stress test with your doctor.", "Avoid suddenly starting highly strenuous activities without medical clearance.", "Share this secure report with your doctor during your next visit."];
     }
-    
     return [];
   };
 
@@ -405,14 +377,7 @@ export default function App() {
     );
   }
 
-  if (loadingSession) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50 flex items-center justify-center font-sans">
-        <p className="text-gray-600 font-semibold animate-pulse">Securing Connection...</p>
-      </div>
-    );
-  }
-
+  if (loadingSession) return (<div className="min-h-screen bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50 flex items-center justify-center font-sans"><p className="text-gray-600 font-semibold animate-pulse">Securing Connection...</p></div>);
   if (!session) return <Auth />;
 
   return (
@@ -428,7 +393,6 @@ export default function App() {
               <p className="text-sm font-medium text-gray-500">Patient-Owned Zero-Trust Architecture</p>
             </div>
           </div>
-
           <div className="flex items-center gap-3">
             <div className="hidden md:flex items-center gap-3 bg-white/50 px-4 py-2 rounded-2xl border border-white/60 shadow-sm">
               <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white font-bold text-sm shadow-inner">{userInitial}</div>
@@ -438,9 +402,8 @@ export default function App() {
               </div>
               <button onClick={() => setShowWallet(true)} className="ml-2 bg-indigo-100 hover:bg-indigo-200 text-indigo-700 p-1.5 rounded-xl transition-all" title="Manage Keys"><Wallet className="w-4 h-4" /></button>
             </div>
-
             <div className="flex items-center gap-2 bg-gray-100/50 p-1.5 rounded-2xl border border-gray-200/50">
-              <button onClick={() => setMainTab('upload')} className={`px-5 py-2.5 rounded-xl text-sm font-bold transition-all flex items-center gap-2 ${mainTab === 'upload' ? 'bg-white text-indigo-700 shadow-sm border border-white' : 'text-gray-600 hover:text-gray-900'}`}><UploadCloud className="w-4 h-4"/> New</button>
+              <button onClick={() => {setMainTab('upload'); setTrendData(null);}} className={`px-5 py-2.5 rounded-xl text-sm font-bold transition-all flex items-center gap-2 ${mainTab === 'upload' ? 'bg-white text-indigo-700 shadow-sm border border-white' : 'text-gray-600 hover:text-gray-900'}`}><UploadCloud className="w-4 h-4"/> New</button>
               <button onClick={() => setMainTab('vault')} className={`px-5 py-2.5 rounded-xl text-sm font-bold transition-all flex items-center gap-2 ${mainTab === 'vault' ? 'bg-white text-purple-700 shadow-sm border border-white' : 'text-gray-600 hover:text-gray-900'}`}><Database className="w-4 h-4"/> Vault</button>
               <button onClick={handleSignOut} className="ml-2 px-3 py-2.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-xl text-sm font-bold transition-all" title="Sign Out"><LogOut className="w-4 h-4"/></button>
             </div>
@@ -450,7 +413,8 @@ export default function App() {
         {/* UPLOAD TAB */}
         {mainTab === 'upload' && (
           <div className="bg-white/40 backdrop-blur-xl border border-white/50 shadow-2xl rounded-3xl p-6 md:p-10 w-full animate-in fade-in slide-in-from-bottom-4">
-            <div className="flex gap-4 mb-8 bg-white/50 p-1.5 rounded-2xl w-fit mx-auto border border-white/60">
+             {/* Upload UI Content remains unchanged */}
+             <div className="flex gap-4 mb-8 bg-white/50 p-1.5 rounded-2xl w-fit mx-auto border border-white/60">
               <button onClick={() => handleDiseaseTabSwitch('diabetes')} className={`px-6 py-2.5 rounded-xl text-sm font-bold transition-all flex items-center gap-2 ${activeDiseaseTab === 'diabetes' ? 'bg-white shadow-sm text-blue-600' : 'text-gray-600 hover:text-gray-900'}`}><Activity className="w-4 h-4"/> Diabetes Screen</button>
               <button onClick={() => handleDiseaseTabSwitch('heart')} className={`px-6 py-2.5 rounded-xl text-sm font-bold transition-all flex items-center gap-2 ${activeDiseaseTab === 'heart' ? 'bg-white shadow-sm text-red-500' : 'text-gray-600 hover:text-gray-900'}`}><Heart className="w-4 h-4"/> Cardiac Screen</button>
             </div>
@@ -488,25 +452,6 @@ export default function App() {
                 </div>
                 <button onClick={handleAnalysis} disabled={isAnalyzing || !keyPair} className="w-full bg-gray-900 hover:bg-black text-white font-bold py-4 rounded-2xl shadow-xl transition-all disabled:opacity-70 flex justify-center items-center gap-3 text-lg">
                   {isAnalyzing ? <><span className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></span> Encrypting & Analyzing...</> : <><ShieldAlert className="w-5 h-5"/> Run Secure Homomorphic Analysis</>}
-                </button>
-              </div>
-            )}
-
-            {result && result.status === 'error' && (
-              <div className="mt-8 bg-red-50/80 border border-red-200 p-6 rounded-3xl animate-in fade-in slide-in-from-bottom-4">
-                <div className="flex items-center gap-3 mb-4 border-b border-red-200 pb-4">
-                  <XCircle className="text-red-600 w-8 h-8" />
-                  <div>
-                    <p className="font-bold text-red-900 text-lg">System Alert: Architecture Blocked</p>
-                    <p className="text-sm text-red-700">The Homomorphic pipeline encountered an issue.</p>
-                  </div>
-                </div>
-                <div className="bg-white/60 p-4 rounded-xl border border-red-100">
-                  <p className="font-mono text-sm text-red-800 font-bold">Trace:</p>
-                  <p className="font-mono text-sm text-red-600 mt-1">{result.message}</p>
-                </div>
-                <button onClick={() => setResult(null)} className="mt-6 w-full bg-red-100 hover:bg-red-200 text-red-800 font-bold py-3 rounded-xl transition-all shadow-sm">
-                  Acknowledge & Retry
                 </button>
               </div>
             )}
@@ -551,14 +496,68 @@ export default function App() {
         {/* VAULT TAB */}
         {mainTab === 'vault' && (
           <div className="space-y-6 animate-in fade-in slide-in-from-right-8">
-            <div className="bg-purple-100/50 border border-purple-200 p-6 rounded-3xl flex items-start gap-4">
-              <Key className="w-6 h-6 text-purple-600 shrink-0 mt-1" />
-              <div>
-                <h3 className="font-bold text-purple-900 text-lg">Your Cryptographic Vault</h3>
-                <p className="text-purple-700 text-sm mt-1">Stored homomorphically encrypted in the cloud. You are the only person who holds the private key (stored securely in your browser cache) to reveal the actual diagnosis.</p>
+            
+            {/* ZERO TRUST ANALYTICS DASHBOARD */}
+            <div className="bg-white/80 backdrop-blur-xl border-2 border-indigo-100 p-6 rounded-3xl shadow-md">
+              <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-4">
+                <div>
+                  <h3 className="font-extrabold text-indigo-900 text-xl flex items-center gap-2"><LineChart className="w-6 h-6 text-indigo-600"/> Zero-Trust Health Trend</h3>
+                  <p className="text-gray-600 text-sm mt-1 max-w-lg">Because your data is encrypted, the cloud cannot track your health. Click to securely decrypt your history locally and generate your progress timeline.</p>
+                </div>
+                <div className="flex gap-2 w-full md:w-auto">
+                  <select 
+                    value={trendDiseaseFilter} 
+                    onChange={(e) => {setTrendDiseaseFilter(e.target.value); setTrendData(null);}}
+                    className="bg-indigo-50 border border-indigo-200 text-indigo-800 text-sm rounded-xl px-4 py-3 font-bold focus:outline-none"
+                  >
+                    <option value="diabetes">Diabetes Screen</option>
+                    <option value="heart">Cardiac Screen</option>
+                  </select>
+                  <button 
+                    onClick={generateTrendAnalysis} 
+                    disabled={isGeneratingTrend || !keyPair}
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-6 py-3 rounded-xl shadow-md transition-all flex items-center justify-center min-w-[140px]"
+                  >
+                    {isGeneratingTrend ? <span className="animate-pulse">Decoding...</span> : "Unlock Trend"}
+                  </button>
+                </div>
               </div>
+
+              {trendData?.error && (
+                <div className="bg-orange-50 border border-orange-200 text-orange-800 p-4 rounded-xl text-sm font-medium">
+                  {trendData.error}
+                </div>
+              )}
+
+              {trendData?.timeline && (
+                <div className="mt-6 pt-6 border-t border-indigo-100 animate-in fade-in">
+                  <div className="flex overflow-x-auto pb-4 gap-4 snap-x">
+                    {trendData.timeline.map((point, index) => {
+                      const prevPoint = index > 0 ? trendData.timeline[index - 1] : null;
+                      const isImprovement = prevPoint && point.scoreMagnitude < prevPoint.scoreMagnitude;
+                      const isWorse = prevPoint && point.scoreMagnitude > prevPoint.scoreMagnitude;
+
+                      return (
+                        <div key={point.id} className="snap-center min-w-[160px] bg-white border border-gray-100 rounded-2xl p-4 shadow-sm flex-shrink-0">
+                          <p className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">{point.date}</p>
+                          <p className={`text-lg font-black ${point.riskLevel === 'High Risk' ? 'text-red-600' : 'text-green-600'}`}>{point.riskLevel}</p>
+                          
+                          {index > 0 && (
+                            <div className={`mt-3 flex items-center gap-1 text-sm font-bold ${isImprovement ? 'text-green-600' : isWorse ? 'text-red-500' : 'text-gray-400'}`}>
+                              {isImprovement ? <TrendingDown className="w-4 h-4"/> : isWorse ? <TrendingUp className="w-4 h-4"/> : null}
+                              {isImprovement ? 'Score Dropped' : isWorse ? 'Score Rose' : 'Stable'}
+                            </div>
+                          )}
+                          {index === 0 && <div className="mt-3 text-sm font-medium text-gray-400 italic">Baseline Scan</div>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
 
+            {/* Standard History List */}
             {isFetchingHistory ? (
               <div className="text-center py-12 text-gray-500 font-medium animate-pulse">Accessing Vault...</div>
             ) : historyRecords.length === 0 ? (
@@ -566,7 +565,6 @@ export default function App() {
             ) : (
               historyRecords.map((record) => (
                 <div key={record.id} className="bg-white/60 backdrop-blur-xl border border-white/80 p-6 rounded-3xl shadow-sm hover:shadow-md transition-all flex flex-col md:flex-row gap-6 relative group">
-                  
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-3 mb-4">
                       <span className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider flex items-center gap-1 ${record.disease_type === 'diabetes' ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-700'}`}>
@@ -584,7 +582,6 @@ export default function App() {
                         </button>
                       )}
                     </div>
-
                     <div>
                       <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Encrypted Ciphertext</p>
                       <p className="font-mono text-xs bg-gray-900 text-green-400 p-3 rounded-xl break-all line-clamp-2 border border-gray-700 shadow-inner">{record.encrypted_result}</p>
@@ -630,23 +627,14 @@ export default function App() {
             
             <div className="bg-gray-50 rounded-2xl p-5 border border-gray-200 mb-6">
               <p className="text-sm font-bold text-gray-700 mb-2">1. Backup Vault Key</p>
-              <p className="text-xs text-gray-500 mb-4">Your key is locked to this browser. You must save this token to recover your history on a new device. Absolute privacy means absolute responsibility.</p>
-              
+              <p className="text-xs text-gray-500 mb-4">Your key is locked to this browser. You must save this token to recover your history on a new device.</p>
               <div className="flex gap-3 mt-4">
-                <button 
-                  onClick={copyPrivateKey} 
-                  className="flex-1 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 p-3 rounded-xl transition-all font-bold text-sm flex items-center justify-center gap-2"
-                >
+                <button onClick={copyPrivateKey} className="flex-1 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 p-3 rounded-xl transition-all font-bold text-sm flex items-center justify-center gap-2">
                   {copied ? <CheckCircle2 className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
                   {copied ? "Copied!" : "Copy Text"}
                 </button>
-                
-                <button 
-                  onClick={downloadBackupFile} 
-                  className="flex-1 bg-gray-900 hover:bg-black text-white p-3 rounded-xl transition-all font-bold text-sm flex items-center justify-center gap-2 shadow-md"
-                >
-                  <Download className="w-4 h-4" />
-                  Download Key File
+                <button onClick={downloadBackupFile} className="flex-1 bg-gray-900 hover:bg-black text-white p-3 rounded-xl transition-all font-bold text-sm flex items-center justify-center gap-2 shadow-md">
+                  <Download className="w-4 h-4" /> Download Key File
                 </button>
               </div>
             </div>
@@ -655,18 +643,8 @@ export default function App() {
               <p className="text-sm font-bold text-indigo-900 mb-2">2. Restore Existing Vault</p>
               <p className="text-xs text-indigo-700/70 mb-3">Switching devices? Paste your backup token here to regain access to your old records.</p>
               <div className="flex gap-2">
-                <input 
-                  type="text" 
-                  value={importKeyString}
-                  onChange={(e) => setImportKeyString(e.target.value)}
-                  placeholder="Paste backup token here..." 
-                  className="flex-1 text-xs px-4 py-3 rounded-xl border border-indigo-200 focus:ring-2 focus:ring-indigo-500 outline-none"
-                />
-                <button 
-                  onClick={handleImportWallet}
-                  disabled={!importKeyString}
-                  className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white px-4 rounded-xl font-bold text-sm transition-all flex items-center gap-2"
-                >
+                <input type="text" value={importKeyString} onChange={(e) => setImportKeyString(e.target.value)} placeholder="Paste backup token here..." className="flex-1 text-xs px-4 py-3 rounded-xl border border-indigo-200 focus:ring-2 focus:ring-indigo-500 outline-none"/>
+                <button onClick={handleImportWallet} disabled={!importKeyString} className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white px-4 rounded-xl font-bold text-sm transition-all flex items-center gap-2">
                   <Download className="w-4 h-4"/> Restore
                 </button>
               </div>
