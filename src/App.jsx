@@ -3,6 +3,7 @@ import { UploadCloud, Activity, Heart, CheckCircle2, AlertCircle, FileText, LogO
 import { supabase } from './supabaseClient';
 import Auth from './Auth';
 import * as paillierBigint from 'paillier-bigint';
+import CryptoJS from 'crypto-js'; // <-- NEW: AES Encryption Library
 import { extractVitalsFromPDF } from './pdfParser';
 
 export default function App() {
@@ -47,7 +48,6 @@ export default function App() {
   };
 
   useEffect(() => {
-    // 1. Initialize Auth and Cryptography
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session); setLoadingSession(false);
       if (session) initializeCryptography(session.user.id);
@@ -58,10 +58,9 @@ export default function App() {
       if (session) initializeCryptography(session.user.id);
     });
 
-    // 2. THE NEW PING: Wake up the Render server in the background
     const wakeUpCloudServer = async () => {
       try {
-        await fetch('https://secure-med-cloud.onrender.com/', { mode: 'no-cors' });
+        await fetch(import.meta.env.VITE_BACKEND_URL || 'https://secure-med-cloud.onrender.com/', { mode: 'no-cors' });
         console.log("Cloud server pre-warmed.");
       } catch (e) {
         console.log("Pre-warm ping ignored.");
@@ -157,12 +156,48 @@ export default function App() {
     setIsFetchingHistory(false);
   };
 
+  // --- NEW: Hybrid AES-256 File Decryption ---
   const handleViewReport = async (path, id) => {
     setOpeningFileId(id);
-    const { data, error } = await supabase.storage.from('medical_reports').createSignedUrl(path, 60);
-    setOpeningFileId(null);
-    if (error) alert("Could not access file: " + error.message);
-    else window.open(data.signedUrl, '_blank'); 
+    try {
+      // BACKWARD COMPATIBILITY: If it's an old unencrypted PDF, just open it normally
+      if (path.endsWith('.pdf')) {
+        const { data, error } = await supabase.storage.from('medical_reports').createSignedUrl(path, 60);
+        if (error) throw new Error(error.message);
+        window.open(data.signedUrl, '_blank');
+        setOpeningFileId(null);
+        return;
+      }
+
+      // ZERO-TRUST DECRYPTION: If it's an '.enc' file, download and decrypt locally
+      if (!keyPair) throw new Error("Private Key missing. Cannot decrypt report.");
+
+      const { data: blobData, error } = await supabase.storage.from('medical_reports').download(path);
+      if (error) throw new Error("Cloud Download Failed: " + error.message);
+
+      const encryptedText = await blobData.text();
+      const securePassphrase = keyPair.privateKey.lambda.toString(); // Use private key component as AES password
+      
+      const decryptedBytes = CryptoJS.AES.decrypt(encryptedText, securePassphrase);
+      const originalBase64Data = decryptedBytes.toString(CryptoJS.enc.Utf8);
+
+      if (!originalBase64Data) throw new Error("Decryption failed. This file was encrypted with a different key.");
+
+      // Convert the Base64 string back into a visual PDF
+      const fetchResp = await fetch(originalBase64Data);
+      const pdfBlob = await fetchResp.blob();
+      const objectUrl = URL.createObjectURL(pdfBlob);
+
+      window.open(objectUrl, '_blank');
+      
+      // Clean up memory after 15 seconds
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 15000);
+
+    } catch (error) {
+      alert("Secure View Error: " + error.message);
+    } finally {
+      setOpeningFileId(null);
+    }
   };
 
   const handleHistoryDecrypt = (id) => {
@@ -229,7 +264,21 @@ export default function App() {
     try {
       const extractedData = await extractVitalsFromPDF(uploadedFile, uploadDiseaseType); setVitals(extractedData);
     } catch (error) { setResult({ status: 'error', message: error.message }); setFile(null); } 
-    finally { setIsExtracting(false); }
+    finally { 
+      setIsExtracting(false);
+      // UX Polish: Reset the hidden HTML input so the user can re-upload the same file if needed
+      if (document.getElementById('fileUpload')) document.getElementById('fileUpload').value = '';
+    }
+  };
+
+  // Helper to read files before encrypting them
+  const readFileAsDataURL = (file) => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = error => reject(error);
+      reader.readAsDataURL(file);
+    });
   };
 
   const handleAnalysis = async () => {
@@ -239,7 +288,7 @@ export default function App() {
     if (uploadDiseaseType === 'heart' && !vitals.h_chol) { setResult({ status: 'error', message: 'Missing Data: We could not find required Cardiac metrics.' }); setIsAnalyzing(false); return; }
 
     try {
-      const endpoint = `https://secure-med-cloud.onrender.com/api/predict/${uploadDiseaseType}`;
+      const endpoint = `${import.meta.env.VITE_BACKEND_URL || 'https://secure-med-cloud.onrender.com'}/api/predict/${uploadDiseaseType}`;
       const rawFeatures = uploadDiseaseType === 'diabetes' 
         ? [vitals.preg, vitals.glucose, vitals.bp, vitals.skin, vitals.insulin, vitals.bmi, vitals.dpf, vitals.age]
         : [vitals.h_age, vitals.h_sex, vitals.h_cp, vitals.h_trestbps, vitals.h_chol, vitals.h_fbs, vitals.h_thalach, vitals.h_exang];
@@ -254,13 +303,22 @@ export default function App() {
 
       if (data.status === "success") {
         let finalFilePath = null;
+        
+        // --- NEW: Client-Side AES-256 File Encryption ---
         if (file) {
-          const fileExt = file.name.split('.').pop();
-          const uniqueFileName = `${session.user.id}/${Math.random().toString(36).substring(2)}-${Date.now()}.${fileExt}`;
-          const { error: uploadError } = await supabase.storage.from('medical_reports').upload(uniqueFileName, file);
+          const base64FileData = await readFileAsDataURL(file);
+          const securePassphrase = keyPair.privateKey.lambda.toString(); // Use the highly secret Paillier component
+          const encryptedFileString = CryptoJS.AES.encrypt(base64FileData, securePassphrase).toString();
+
+          // Upload it as a text blob instead of a PDF
+          const encryptedBlob = new Blob([encryptedFileString], { type: 'text/plain' });
+          const uniqueFileName = `${session.user.id}/${Math.random().toString(36).substring(2)}-${Date.now()}.enc`;
+
+          const { error: uploadError } = await supabase.storage.from('medical_reports').upload(uniqueFileName, encryptedBlob);
           if (uploadError) throw new Error("Secure File Upload Failed: " + uploadError.message);
           finalFilePath = uniqueFileName;
         }
+
         const { error: dbError } = await supabase.from('patient_history').insert([{
             patient_id: session.user.id, disease_type: uploadDiseaseType,
             encrypted_result: String(data.encrypted_result?.[0] || data.encrypted_result), 
